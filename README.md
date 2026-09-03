@@ -50,6 +50,12 @@ Exports go into unique timestamped subdirectories. Files are never executed by t
 
 Tables use Qt models rather than one widget per cell. Filters search all columns. Column widths can be resized. Results and strings are displayed as plain text, not interpreted HTML. The demo is entirely synthetic and uses documentation-only network addresses.
 
+## Copying lab answers
+
+- In any evidence table or the process tree, click a field and press **Ctrl+C** (**Cmd+C** on macOS), or right-click it and choose **Copy value**.
+- Copy uses the full value even when the column truncates it. Sorting and filtering preserve the correct value. Missing values copy as empty text.
+- In the Metadata, Overview, and activity panels, highlight the desired text and use **Ctrl+C** or the standard right-click **Copy** menu.
+
 ## Symbols and troubleshooting
 
 Volatility needs matching symbols. Windows symbols may download automatically on the first run; **Offline symbols** disables online symbol retrieval. Set an optional local symbol directory before running analysis. Symbol setup can take time, with the rest of the GUI still usable. The host must have sufficient RAM for Volatility and the selected result sets.

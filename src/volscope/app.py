@@ -6,9 +6,10 @@ from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProxyModel, QThread
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QListWidget, QMainWindow, QMessageBox, QPlainTextEdit, QPushButton,
+    QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QSplitter, QStackedWidget, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -31,6 +32,9 @@ class RowsModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.columns)
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if index.isValid() and role == Qt.ItemDataRole.EditRole:
+            value = self.rows[index.row()].get(self.columns[index.column()])
+            return "" if value is None else str(value)
         if index.isValid() and role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
             value = self.rows[index.row()].get(self.columns[index.column()])
             return "—" if value is None else str(value)
@@ -40,6 +44,35 @@ class RowsModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self.columns[section]
         return None
+
+
+def enable_field_copy(view):
+    """Copy the focused cell, or the cell under a context-menu request."""
+    def copy_value():
+        index = view.currentIndex()
+        if index.isValid():
+            value = index.data(Qt.ItemDataRole.EditRole)
+            QApplication.clipboard().setText("" if value is None else str(value))
+
+    action = QAction("Copy value", view)
+    action.setShortcuts(QKeySequence.StandardKey.Copy)
+    action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+    action.triggered.connect(copy_value)
+    view.addAction(action)
+    view.setToolTip("Select a field and press Ctrl+C, or right-click to copy its value.")
+
+    def show_menu(position):
+        index = view.indexAt(position)
+        if not index.isValid():
+            return
+        view.setCurrentIndex(index)
+        menu = QMenu(view)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.addAction(action)
+        menu.popup(view.viewport().mapToGlobal(position))
+
+    view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    view.customContextMenuRequested.connect(show_menu)
 
 
 class EvidenceTable(QWidget):
@@ -52,7 +85,7 @@ class EvidenceTable(QWidget):
         layout.addWidget(self.search)
         layout.addWidget(self.count)
         self.view = QTableView()
-        self.view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self.view.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
         self.view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self.view.setSortingEnabled(True)
         self.view.setWordWrap(False)
@@ -62,6 +95,7 @@ class EvidenceTable(QWidget):
         self.proxy.setFilterKeyColumn(-1)
         self.proxy.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.view.setModel(self.proxy)
+        enable_field_copy(self.view)
         self.search.textChanged.connect(self.proxy.setFilterFixedString)
         layout.addWidget(self.view)
         self.set_rows([])
@@ -169,6 +203,8 @@ class MainWindow(QMainWindow):
                 self.tree = QTreeWidget()
                 self.tree.setHeaderLabels(["Process", "PID", "PPID", "Created"])
                 self.tree.setColumnWidth(0, 260)
+                self.tree.setSelectionBehavior(QTreeWidget.SelectionBehavior.SelectItems)
+                enable_field_copy(self.tree)
                 self.tree.itemSelectionChanged.connect(self.tree_selected)
                 page_layout.addWidget(self.tree)
             else:
@@ -182,7 +218,7 @@ class MainWindow(QMainWindow):
                 table = EvidenceTable()
                 self.tables[section] = table
                 if section in ("Processes", "Network", "DLLs", "Memory Regions", "Timeline"):
-                    table.view.clicked.connect(lambda index, t=table: self.select_pid(pid_of(t.selected(index))))
+                    table.view.clicked.connect(lambda index, t=table: self.select_table_pid(t, index))
                 page_layout.addWidget(table)
             self.pages.addWidget(page)
         self.nav.currentRowChanged.connect(self.pages.setCurrentIndex)
@@ -404,6 +440,12 @@ class MainWindow(QMainWindow):
         items = self.tree.selectedItems()
         if items:
             self.select_pid(items[0].data(0, Qt.ItemDataRole.UserRole))
+
+    def select_table_pid(self, table, index):
+        pid = pid_of(table.selected(index))
+        # Keep the clicked cell focused when inspecting the already-selected PID.
+        if pid != self.pid:
+            self.select_pid(pid)
 
     def select_pid(self, pid):
         self.pid = pid
