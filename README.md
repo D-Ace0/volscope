@@ -2,23 +2,77 @@
 
 A native PySide6 desktop workspace for Volatility 3 memory investigations. Select a local memory image, inspect its process tree, and correlate process metadata, command lines, network objects, and DLLs without reading large terminal tables.
 
-**MVP scope:** runs on Kali/Linux first, with portable Python/Qt code for Windows and macOS. The current plugin registry analyzes **Windows memory images**, regardless of the host OS. Linux/macOS *image analysis* requires additional plugin adapters. No memory image is uploaded by this application.
+**MVP scope:** the desktop application can run on Linux, macOS, and Windows, but the current plugin registry analyzes **Windows memory images** on all three hosts. Linux and macOS *memory-image analysis* needs future plugin adapters. No memory image is uploaded by this application.
 
-## Setup and launch on Kali/Linux
+## Platform support
 
-Requires Python 3.10+ and a graphical desktop.
+| Host platform | GUI and Windows-image analysis | Strings Search | Notes |
+| --- | --- | --- | --- |
+| Kali, Debian, Ubuntu | Supported | Install `binutils` | Primary environment |
+| Fedora/RHEL family | Supported | Install `binutils` | Package names differ from Debian |
+| Arch/Manjaro | Supported | Install `binutils` | Uses `pacman` |
+| openSUSE | Supported | Install `binutils` | Uses `zypper` |
+| macOS | Supported | Install Homebrew `binutils` and expose GNU `strings` | Intel and Apple Silicon Python wheels are supported upstream |
+| Windows 10/11 | Supported | Requires a GNU-compatible `strings` in `PATH`; WSL is the easiest option | PowerShell instructions are below |
+| iOS/iPadOS | **Not supported** | Not supported | PySide6 is a desktop framework; use macOS for an Apple computer |
+
+All desktop platforms require Python 3.10 or newer, Git, enough free storage for the memory image and recovered files, and enough RAM for the chosen Volatility plugins.
+
+## Clone the project
+
+```sh
+git clone https://github.com/D-Ace0/volscope.git
+cd volscope
+```
+
+### Kali, Debian, and Ubuntu
 
 ```sh
 sudo apt update
 sudo apt install python3-venv libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 binutils
-cd volscope
 chmod +x install-kali.sh
 ./install-kali.sh
+exec "$SHELL"
+volscope --demo
 ```
 
-The installer detects zsh or bash, creates `.venv`, installs VolScope, creates `~/.local/bin/volscope`, and adds that standard user-bin directory to `.zshrc` or `.bashrc` only when it is missing. It disables a legacy `volscope` alias if one would override the launcher, preserving a backup of the shell configuration. Run `exec "$SHELL"` or open a new terminal, then run `volscope` from anywhere.
+### Fedora and related distributions
 
-Manual setup is also available:
+```sh
+sudo dnf install python3 python3-pip binutils libxkbcommon-x11 xcb-util-cursor mesa-libGL
+chmod +x install-kali.sh
+./install-kali.sh
+exec "$SHELL"
+volscope --demo
+```
+
+On an immutable Fedora desktop, install the system libraries through the host package-management method appropriate for that edition, then run the Python installer as your normal user.
+
+### Arch Linux and Manjaro
+
+```sh
+sudo pacman -S --needed python python-pip binutils libxkbcommon-x11 xcb-util-cursor libglvnd
+chmod +x install-kali.sh
+./install-kali.sh
+exec "$SHELL"
+volscope --demo
+```
+
+### openSUSE
+
+```sh
+sudo zypper install python3 python3-pip binutils libxkbcommon-x11-0 libxcb-cursor0 libGL1
+chmod +x install-kali.sh
+./install-kali.sh
+exec "$SHELL"
+volscope --demo
+```
+
+Despite its current filename, `install-kali.sh` is usable on the Linux distributions above after their system dependencies are installed. It detects zsh or bash, creates `.venv`, installs VolScope, creates `~/.local/bin/volscope`, and adds that directory to `.zshrc` or `.bashrc` only when needed. It disables a legacy `volscope` alias if one would override the launcher and preserves a shell-configuration backup.
+
+### Generic Linux manual installation
+
+Use this when your distribution is not listed. Install Python 3, Python's `venv` support, GNU `binutils`, OpenGL, and the Qt/XCB runtime libraries with your distribution's package manager, then run:
 
 ```sh
 python3 -m venv .venv
@@ -26,11 +80,90 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e .
 volscope --demo
-# Real investigation:
+```
+
+This manual command is available while the virtual environment is active. Run `./install-kali.sh` instead if you also want the permanent `~/.local/bin/volscope` launcher.
+
+### macOS
+
+Install [Homebrew](https://brew.sh/) if it is not already installed, then:
+
+```sh
+brew install python git binutils
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$(brew --prefix binutils)/bin/strings" "$HOME/.local/bin/strings"
+ln -sfn "$(brew --prefix binutils)/bin/strings" ".venv/bin/strings"
+volscope --demo
+```
+
+Keep the environment active to run `volscope`, or install the project as an isolated global command with `pipx`:
+
+```sh
+brew install pipx
+pipx ensurepath
+pipx install .
+```
+
+Open a new terminal after `pipx ensurepath`. Homebrew keeps GNU binutils separate from Apple's system tools, which is why the `strings` symlink is created explicitly. iPhone and iPad cannot run this desktop application.
+
+### Windows 10/11
+
+Install a current 64-bit Python from [python.org](https://www.python.org/downloads/windows/) and Git for Windows. In PowerShell:
+
+```powershell
+git clone https://github.com/D-Ace0/volscope.git
+cd volscope
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e .
+volscope --demo
+```
+
+While the environment is active, `volscope` works from any directory. For a persistent isolated command that does not require activation:
+
+```powershell
+py -m pip install --user pipx
+py -m pipx ensurepath
+py -m pipx install .
+```
+
+Close and reopen PowerShell after `ensurepath`, then run `volscope` anywhere. If PowerShell blocks `Activate.ps1`, use Command Prompt and run `.venv\Scripts\activate.bat`, or use the `pipx` installation. The main Volatility workflow works natively on Windows. Strings Search additionally needs GNU `strings`; use VolScope inside WSL for that page, or place a compatible GNU `strings.exe` in `PATH`.
+
+## Launching and updating
+
+Launch the training interface without selecting evidence:
+
+```sh
+volscope --demo
+```
+
+Launch a real investigation:
+
+```sh
 volscope
 ```
 
-On Windows, create the environment with `py -m venv .venv`, activate with `.venv\Scripts\Activate.ps1`, then use the same pip and launch commands. On macOS, use the Linux Python environment steps without apt. `python -m volscope` also starts the app.
+When installed in editable mode with `install-kali.sh` or `pip install -e .`, update with:
+
+```sh
+cd /path/to/volscope
+git pull
+```
+
+If installed with `pipx`, update the checkout and reinstall it:
+
+```sh
+cd /path/to/volscope
+git pull
+pipx install --force .
+```
+
+`python -m volscope` is also available from an activated project environment.
 
 ## Investigation workflow
 
