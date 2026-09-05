@@ -16,7 +16,7 @@ chmod +x install-kali.sh
 ./install-kali.sh
 ```
 
-The installer detects zsh or bash, creates `.venv`, installs VolScope, creates `~/.local/bin/volscope`, and adds that standard user-bin directory to `.zshrc` or `.bashrc` only when it is missing. Open a new terminal and run `volscope` from anywhere.
+The installer detects zsh or bash, creates `.venv`, installs VolScope, creates `~/.local/bin/volscope`, and adds that standard user-bin directory to `.zshrc` or `.bashrc` only when it is missing. It disables a legacy `volscope` alias if one would override the launcher, preserving a backup of the shell configuration. Run `exec "$SHELL"` or open a new terminal, then run `volscope` from anywhere.
 
 Manual setup is also available:
 

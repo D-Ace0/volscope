@@ -30,4 +30,23 @@ if [[ ":$PATH:" != *":$launcher_dir:"* ]] && ! grep -Fqx "$path_line" "$rc_file"
   echo "Added ~/.local/bin to $rc_file"
 fi
 
-echo "VolScope installed. Open a new terminal, then run: volscope"
+# An alias wins over PATH lookup. Disable legacy aliases that commonly point to
+# the old, nonexistent ~/volscope/volscope script while preserving the line.
+if [[ -f "$rc_file" ]] && grep -Eq '^[[:space:]]*alias[[:space:]]+volscope=' "$rc_file"; then
+  cp "$rc_file" "$rc_file.volscope-backup"
+  python3 - "$rc_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+pattern = re.compile(r"^\s*alias\s+volscope=")
+path.write_text("".join("# Disabled by VolScope installer: " + line if pattern.match(line) else line for line in lines))
+PY
+  echo "Disabled an old 'volscope' alias in $rc_file (backup: $rc_file.volscope-backup)"
+fi
+
+echo "VolScope installed at $launcher_dir/volscope"
+echo "Reload this shell with: exec ${SHELL:-/bin/bash}"
+echo "Then run from anywhere: volscope"
