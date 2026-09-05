@@ -10,8 +10,17 @@ Requires Python 3.10+ and a graphical desktop.
 
 ```sh
 sudo apt update
-sudo apt install python3-venv libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
+sudo apt install python3-venv libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0 binutils
 cd volscope
+chmod +x install-kali.sh
+./install-kali.sh
+```
+
+The installer detects zsh or bash, creates `.venv`, installs VolScope, creates `~/.local/bin/volscope`, and adds that standard user-bin directory to `.zshrc` or `.bashrc` only when it is missing. Open a new terminal and run `volscope` from anywhere.
+
+Manual setup is also available:
+
+```sh
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -47,6 +56,13 @@ Exports go into unique timestamped subdirectories. Files are never executed by t
 | Memory Regions | On-demand VAD information for selected PID |
 | DLLs | On-demand loaded modules for selected PID |
 | Timeline | Derived process creation/exit and network creation events |
+| Strings Search | Background ASCII/UTF-16LE keyword search of the raw image, with offsets and copying |
+
+## Search memory strings
+
+Open **Strings Search**, enter a literal keyword, choose ASCII and/or UTF-16LE, then click **Search memory**. VolScope runs GNU `strings` directly and performs fixed-text filtering inside the app; it never builds a shell command from your input. This gives the practical behavior of `strings | grep -F keyword` while safely supporting spaces, quotes, and shell characters. Results include the hexadecimal image offset, encoding, and complete matching string. Click a field and press **Ctrl+C** to copy it. The result limit prevents a broad keyword from exhausting memory.
+
+The search scans the raw image, not only a selected process. It can find stale or unrelated data and does not prove which process owned a string.
 
 Tables use Qt models rather than one widget per cell. Filters search all columns. Column widths can be resized. Results and strings are displayed as plain text, not interpreted HTML. The demo is entirely synthetic and uses documentation-only network addresses.
 
@@ -82,6 +98,7 @@ src/volscope/
 tests/
   test_core.py  Parser, correlation, tree integrity, arguments, persistence
   test_qt.py    Headless GUI, background jobs, cancellation, streaming hashes
+install-kali.sh Detects bash/zsh and installs a global user launcher
 ```
 
 To add a plugin, register its fully qualified name and PID support in `core.PLUGINS`, then connect a section/action to `run_plugin`. Each run receives separate argv arguments through QProcess (no shell). Add a normalizer if a plugin uses a different schema. PID-scoped results use keys such as `dlllist:4628`. Each case stores image path/size/modification time, normalized JSON, and timestamped run arguments, status, and diagnostics. SQLite operations are on the GUI thread; Volatility execution, JSON decoding, and hashing are background work.

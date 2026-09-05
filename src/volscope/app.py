@@ -10,12 +10,12 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
-    QSplitter, QStackedWidget, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
+    QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
 from .core import BASELINE, PLUGINS, correlate, parent_map, pid_of, processes, timeline
 from .demo import results as demo_results
-from .runner import Hasher, Runner
+from .runner import Hasher, Runner, StringScanner
 from .storage import Case, identity
 
 
@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.results, self.case, self.image, self.pid = {}, None, None, None
         self.demo = False
-        self.hash_worker = None
+        self.hash_worker = self.string_worker = None
         self.runner = Runner(self)
         self.runner.result.connect(self.on_result)
         self.runner.report.connect(self.on_report)
@@ -161,7 +161,7 @@ class MainWindow(QMainWindow):
         self.case_button = self.button(bar, "Open case", self.open_case)
         self.demo_button = self.button(bar, "Explore demo", self.load_demo)
         self.run_button = self.button(bar, "Run baseline", self.baseline)
-        self.cancel_button = self.button(bar, "Cancel analysis", self.runner.cancel)
+        self.cancel_button = self.button(bar, "Cancel analysis", self.cancel_work)
         self.button(bar, "SHA1 / SHA256", self.hash_file)
         bar.addStretch()
         layout.addLayout(bar)
@@ -175,7 +175,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(options)
         split = QSplitter()
         self.nav = QListWidget()
-        self.sections = ["Overview", "Processes", "Process Tree", "Network", "Files", "Memory Regions", "DLLs", "Timeline"]
+        self.sections = ["Overview", "Processes", "Process Tree", "Network", "Files", "Memory Regions", "DLLs", "Timeline", "Strings Search"]
         self.nav.addItems(self.sections)
         self.nav.setMaximumWidth(185)
         split.addWidget(self.nav)
@@ -192,6 +192,40 @@ class MainWindow(QMainWindow):
                 self.overview = QPlainTextEdit()
                 self.overview.setReadOnly(True)
                 page_layout.addWidget(self.overview)
+            elif section == "Strings Search":
+                note = QLabel("Search printable strings in the current raw memory image. Keyword matching is literal, like grep -F.")
+                note.setWordWrap(True)
+                page_layout.addWidget(note)
+                controls = QHBoxLayout()
+                self.strings_keyword = QLineEdit(placeholderText="Keyword, domain, IP address, path, command, or flag…")
+                self.strings_keyword.returnPressed.connect(self.search_strings)
+                controls.addWidget(self.strings_keyword, 1)
+                self.strings_minimum = QSpinBox()
+                self.strings_minimum.setRange(3, 100)
+                self.strings_minimum.setValue(4)
+                self.strings_minimum.setPrefix("Minimum length: ")
+                controls.addWidget(self.strings_minimum)
+                self.strings_limit = QSpinBox()
+                self.strings_limit.setRange(100, 100000)
+                self.strings_limit.setValue(10000)
+                self.strings_limit.setSingleStep(1000)
+                self.strings_limit.setPrefix("Max results: ")
+                controls.addWidget(self.strings_limit)
+                page_layout.addLayout(controls)
+                options = QHBoxLayout()
+                self.strings_case = QCheckBox("Case sensitive")
+                self.strings_ascii = QCheckBox("ASCII")
+                self.strings_ascii.setChecked(True)
+                self.strings_utf16 = QCheckBox("UTF-16LE")
+                self.strings_utf16.setChecked(True)
+                options.addWidget(self.strings_case)
+                options.addWidget(self.strings_ascii)
+                options.addWidget(self.strings_utf16)
+                self.strings_button = self.button(options, "Search memory", self.search_strings, True)
+                options.addStretch()
+                page_layout.addLayout(options)
+                self.strings_table = EvidenceTable()
+                page_layout.addWidget(self.strings_table)
             elif section == "Process Tree":
                 search = QLineEdit(placeholderText="Find process or PID (matching branches stay visible)")
                 search.textChanged.connect(self.filter_tree)
@@ -258,6 +292,11 @@ class MainWindow(QMainWindow):
         if demo:
             self.load_demo()
 
+    def cancel_work(self):
+        self.runner.cancel()
+        if self.string_worker and self.string_worker.isRunning():
+            self.string_worker.cancel()
+
     def button(self, layout, text, slot, primary=False):
         button = QPushButton(text)
         if primary:
@@ -272,7 +311,8 @@ class MainWindow(QMainWindow):
     def on_busy(self, busy):
         for button in (self.open_button, self.case_button, self.demo_button, self.run_button):
             button.setEnabled(not busy)
-        self.cancel_button.setEnabled(busy)
+        strings_busy = bool(self.string_worker and self.string_worker.isRunning())
+        self.cancel_button.setEnabled(busy or strings_busy)
 
     def reset(self):
         if self.case:
@@ -512,9 +552,47 @@ class MainWindow(QMainWindow):
             self.hash_worker.ready.connect(self.log.appendPlainText)
             self.hash_worker.start()
 
+    def search_strings(self):
+        if not self.ensure_image():
+            return
+        keyword = self.strings_keyword.text()
+        if not keyword:
+            self.error("Enter a keyword to search for")
+            return
+        if not (self.strings_ascii.isChecked() or self.strings_utf16.isChecked()):
+            self.error("Select ASCII, UTF-16LE, or both")
+            return
+        if self.string_worker and self.string_worker.isRunning():
+            self.error("A strings search is already running")
+            return
+        self.strings_table.set_rows([])
+        self.strings_button.setEnabled(False)
+        self.cancel_button.setEnabled(True)
+        self.statusBar().showMessage(f"Searching memory strings for {keyword!r}")
+        self.string_worker = StringScanner(
+            self.image, keyword, self.strings_minimum.value(), self.strings_case.isChecked(),
+            self.strings_ascii.isChecked(), self.strings_utf16.isChecked(), self.strings_limit.value(), self)
+        self.string_worker.ready.connect(self.strings_finished)
+        self.string_worker.finished.connect(lambda: self.strings_button.setEnabled(True))
+        self.string_worker.start()
+
+    def strings_finished(self, rows, error, truncated):
+        self.strings_table.set_rows(rows)
+        self.cancel_button.setEnabled(bool(self.runner.active))
+        if error:
+            self.log.appendPlainText("Strings search: " + error)
+            self.statusBar().showMessage(error)
+        else:
+            suffix = " (result limit reached)" if truncated else ""
+            message = f"Strings search complete: {len(rows):,} matches{suffix}"
+            self.log.appendPlainText(message)
+            self.statusBar().showMessage(message)
+
     def closeEvent(self, event):
         if self.runner.active or any(thread.isRunning() for thread in self.findChildren(QThread)):
             self.runner.cancel()
+            if self.string_worker:
+                self.string_worker.cancel()
             if self.hash_worker:
                 self.hash_worker.requestInterruption()
             self.statusBar().showMessage("Cancelling work. Close again when it finishes.")

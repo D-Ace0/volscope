@@ -1,5 +1,7 @@
 """Cancellable QProcess queue; JSON decoding and hashing run in worker threads."""
 import hashlib
+import shutil
+import subprocess
 import sys
 from collections import deque
 from pathlib import Path
@@ -46,6 +48,72 @@ class Hasher(QThread):
             self.ready.emit(f"{self.path}\nSHA1: {sha1.hexdigest()}\nSHA256: {sha256.hexdigest()}")
         except Exception as exc:
             self.ready.emit(f"Hash failed: {exc}")
+
+
+class StringScanner(QThread):
+    """Stream GNU strings output and retain only literal keyword matches."""
+    ready = Signal(object, str, bool)
+
+    def __init__(self, path, keyword, minimum=4, case_sensitive=False,
+                 ascii_strings=True, utf16_strings=True, limit=10000, parent=None):
+        super().__init__(parent)
+        self.path, self.keyword, self.minimum = path, keyword, minimum
+        self.case_sensitive, self.ascii_strings = case_sensitive, ascii_strings
+        self.utf16_strings, self.limit = utf16_strings, limit
+        self.process = None
+
+    def cancel(self):
+        self.requestInterruption()
+        if self.process and self.process.poll() is None:
+            self.process.kill()
+
+    def run(self):
+        executable = shutil.which("strings")
+        if not executable:
+            self.ready.emit([], "The 'strings' command was not found. On Kali run: sudo apt install binutils", False)
+            return
+        needle = self.keyword if self.case_sensitive else self.keyword.casefold()
+        rows, truncated = [], False
+        modes = []
+        if self.ascii_strings:
+            modes.append(("ASCII", []))
+        if self.utf16_strings:
+            modes.append(("UTF-16LE", ["-e", "l"]))
+        try:
+            for encoding, mode in modes:
+                if self.isInterruptionRequested():
+                    self.ready.emit([], "Search cancelled", False)
+                    return
+                args = [executable, "-a", "-t", "x", "-n", str(self.minimum), *mode, self.path]
+                self.process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                text=True, encoding="utf-8", errors="replace")
+                for line in self.process.stdout:
+                    if self.isInterruptionRequested():
+                        self.process.kill()
+                        self.ready.emit([], "Search cancelled", False)
+                        return
+                    line = line.rstrip("\r\n")
+                    parts = line.lstrip().split(maxsplit=1)
+                    if len(parts) != 2:
+                        continue
+                    value = parts[1]
+                    haystack = value if self.case_sensitive else value.casefold()
+                    if needle in haystack:
+                        rows.append({"Offset": "0x" + parts[0], "Encoding": encoding, "String": value})
+                        if len(rows) >= self.limit:
+                            truncated = True
+                            self.process.kill()
+                            break
+                stderr = self.process.stderr.read()
+                code = self.process.wait()
+                self.process = None
+                if code not in (0, -9, 1) and not truncated:
+                    raise RuntimeError(stderr.strip() or f"strings exited with code {code}")
+                if truncated:
+                    break
+            self.ready.emit(rows, "", truncated)
+        except Exception as exc:
+            self.ready.emit([], str(exc), False)
 
 
 class Runner(QObject):

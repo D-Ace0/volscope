@@ -11,7 +11,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QTimer
 from volscope.app import MainWindow
-from volscope.runner import Hasher, Runner
+from volscope.runner import Hasher, Runner, StringScanner
 
 APP = QApplication.instance() or QApplication([])
 
@@ -30,7 +30,7 @@ class QtTests(unittest.TestCase):
         window = MainWindow(demo=True)
         window.show()
         APP.processEvents()
-        self.assertEqual(window.pages.count(), 8)
+        self.assertEqual(window.pages.count(), 9)
         self.assertEqual(window.pid, 4628)
         self.assertIn('LabSample.exe', window.metadata.toPlainText())
         self.assertEqual(window.pid_network.proxy.rowCount(), 1)
@@ -83,6 +83,32 @@ class QtTests(unittest.TestCase):
             wait_for(lambda: bool(messages) and not worker.isRunning())
             self.assertIn(hashlib.sha1(b'abc').hexdigest(), messages[0])
             self.assertIn(hashlib.sha256(b'abc').hexdigest(), messages[0])
+
+    def test_strings_scanner_literal_case_and_utf16(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'memory.raw'
+            path.write_bytes(b'prefix EVIL[.]test suffix\x00' + 'Unicode Secret'.encode('utf-16le'))
+            worker = StringScanner(str(path), 'evil[.]test', case_sensitive=False,
+                                   ascii_strings=True, utf16_strings=True)
+            outcomes = []
+            worker.ready.connect(lambda *args: outcomes.append(args))
+            worker.start()
+            wait_for(lambda: bool(outcomes) and not worker.isRunning())
+            rows, error, truncated = outcomes[0]
+            if "not found" in error:
+                self.skipTest(error)
+            self.assertFalse(error)
+            self.assertFalse(truncated)
+            self.assertEqual(rows[0]['Encoding'], 'ASCII')
+            self.assertIn('EVIL[.]test', rows[0]['String'])
+
+            worker = StringScanner(str(path), 'Unicode Secret', ascii_strings=False,
+                                   utf16_strings=True)
+            outcomes = []
+            worker.ready.connect(lambda *args: outcomes.append(args))
+            worker.start()
+            wait_for(lambda: bool(outcomes) and not worker.isRunning())
+            self.assertEqual(outcomes[0][0][0]['Encoding'], 'UTF-16LE')
 
 
 if __name__ == '__main__':
