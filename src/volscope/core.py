@@ -5,27 +5,42 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Plugin:
-    name: str
     title: str
     pid: bool = False
+    names: dict | None = None
+    pid_args: dict | None = None
+
+    def name(self, platform):
+        value = (self.names or {}).get(platform)
+        if not value:
+            raise ValueError(f"{self.title} is not available for {platform.title()} images")
+        return value
+
+    def pid_arg(self, platform):
+        return (self.pid_args or {}).get(platform, "--pid")
 
 
 PLUGINS = {
-    "info": Plugin("windows.info.Info", "Image information"),
-    "pslist": Plugin("windows.pslist.PsList", "Processes"),
-    "pstree": Plugin("windows.pstree.PsTree", "Process tree"),
-    "cmdline": Plugin("windows.cmdline.CmdLine", "Command lines"),
-    "netscan": Plugin("windows.netscan.NetScan", "Network"),
-    "dlllist": Plugin("windows.dlllist.DllList", "Loaded DLLs", True),
-    "filescan": Plugin("windows.filescan.FileScan", "Files"),
-    "vadinfo": Plugin("windows.vadinfo.VadInfo", "Memory regions", True),
-    "dump_process": Plugin("windows.pslist.PsList", "Export process executable", True),
-    "dump_file": Plugin("windows.dumpfiles.DumpFiles", "Export cached file"),
+    "detect_linux": Plugin("Linux detection", names={"linux": "banners.Banners"}),
+    "detect_windows": Plugin("Windows detection", names={"windows": "windows.info.Info"}),
+    "info": Plugin("Image information", names={"windows": "windows.info.Info", "linux": "banners.Banners"}),
+    "pslist": Plugin("Processes", names={"windows": "windows.pslist.PsList", "linux": "linux.pslist.PsList"}),
+    "pstree": Plugin("Process tree", names={"windows": "windows.pstree.PsTree", "linux": "linux.pstree.PsTree"}),
+    "cmdline": Plugin("Command lines", names={"windows": "windows.cmdline.CmdLine", "linux": "linux.psaux.PsAux"}),
+    "netscan": Plugin("Network", names={"windows": "windows.netscan.NetScan", "linux": "linux.sockstat.Sockstat"},
+                       pid_args={"linux": "--pids"}),
+    "dlllist": Plugin("Loaded libraries", True,
+                      {"windows": "windows.dlllist.DllList", "linux": "linux.elfs.Elfs"}),
+    "filescan": Plugin("Files", names={"windows": "windows.filescan.FileScan", "linux": "linux.lsof.Lsof"}),
+    "vadinfo": Plugin("Memory regions", True, {"windows": "windows.vadinfo.VadInfo", "linux": "linux.proc.Maps"}),
+    "dump_process": Plugin("Export process executable", True,
+                           {"windows": "windows.pslist.PsList", "linux": "linux.pslist.PsList"}),
+    "dump_file": Plugin("Export cached file", names={"windows": "windows.dumpfiles.DumpFiles"}),
 }
 BASELINE = ("info", "pslist", "pstree", "cmdline", "netscan")
 
 
-def command(image, key, pid=None, output=None, offset=None, offline=False, symbols=None):
+def command(image, key, pid=None, output=None, offset=None, offline=False, symbols=None, platform="windows"):
     spec = PLUGINS[key]
     args = ["-m", "volscope.vol_cli", "-q", "-r", "json", "-f", str(image)]
     if offline:
@@ -34,11 +49,11 @@ def command(image, key, pid=None, output=None, offset=None, offline=False, symbo
         args += ["-s", str(symbols)]
     if output:
         args += ["-o", str(output)]
-    args += [spec.name]
+    args += [spec.name(platform)]
     if pid is not None:
         if not spec.pid:
             raise ValueError("This plugin does not accept a PID")
-        args += ["--pid", str(int(pid))]
+        args += [spec.pid_arg(platform), str(int(pid))]
     if key == "dump_process":
         if pid is None or not output:
             raise ValueError("Select a process and export directory")
@@ -70,7 +85,7 @@ def parse_rows(raw):
 
 def pid_of(row):
     try:
-        return int(row.get("PID"))
+        return int(next((row[key] for key in ("PID", "Pid", "pid") if row.get(key) is not None), None))
     except (TypeError, ValueError):
         return None
 
@@ -81,7 +96,12 @@ def processes(results):
         for row in results.get(key, []):
             pid = pid_of(row)
             if pid is not None:
-                merged.setdefault(pid, {}).update({k: v for k, v in row.items() if v is not None})
+                normalized = {k: v for k, v in row.items() if v is not None}
+                normalized["PID"] = pid
+                normalized["PPID"] = normalized.get("PPID", normalized.get("Ppid"))
+                normalized["ImageFileName"] = normalized.get("ImageFileName") or normalized.get("COMM") or normalized.get("Process") or "Unknown"
+                normalized["CreateTime"] = normalized.get("CreateTime") or normalized.get("CREATION TIME")
+                merged.setdefault(pid, {}).update(normalized)
     return merged
 
 
@@ -114,8 +134,10 @@ def parent_map(procs):
 def correlate(results, pid):
     row = dict(processes(results).get(pid, {}))
     commands = [r for r in results.get("cmdline", []) if pid_of(r) == pid]
-    row["Command line"] = next((r.get("Args") for r in commands if r.get("Args")), row.get("Cmd", "Unavailable"))
-    row["Executable path"] = row.get("Path") or row.get("Audit") or "Unavailable"
+    command_keys = ("Args", "ARGS", "Command", "COMMAND", "Cmdline")
+    row["Command line"] = next((r.get(key) for r in commands for key in command_keys if r.get(key)), row.get("Cmd", "Unavailable"))
+    path_keys = ("Path", "Audit", "EXE", "Executable", "File Path")
+    row["Executable path"] = next((row.get(key) for key in path_keys if row.get(key) and str(row.get(key)).lower() not in ("disabled", "unavailable")), "Unavailable")
     return row, [r for r in results.get("netscan", []) if pid_of(r) == pid], results.get(f"dlllist:{pid}", [])
 
 

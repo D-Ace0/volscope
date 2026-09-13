@@ -2,17 +2,17 @@
 
 A native PySide6 desktop workspace for Volatility 3 memory investigations. Select a local memory image, inspect its process tree, and correlate process metadata, command lines, network objects, and DLLs without reading large terminal tables.
 
-**MVP scope:** the desktop application can run on Linux, macOS, and Windows, but the current plugin registry analyzes **Windows memory images** on all three hosts. Linux and macOS *memory-image analysis* needs future plugin adapters. No memory image is uploaded by this application.
+**MVP scope:** the desktop application can run on Linux, macOS, and Windows. VolScope now supports Windows and Linux memory images through platform-specific Volatility 3 plugins; macOS memory-image analysis still needs a future adapter. No memory image is uploaded by this application.
 
 ## Platform support
 
-| Host platform | GUI and Windows-image analysis | Strings Search | Notes |
+| Host platform | GUI and supported image analysis | Strings Search | Notes |
 | --- | --- | --- | --- |
 | Kali, Debian, Ubuntu | Supported | Install `binutils` | Primary environment |
 | Fedora/RHEL family | Supported | Install `binutils` | Package names differ from Debian |
 | Arch/Manjaro | Supported | Install `binutils` | Uses `pacman` |
 | openSUSE | Supported | Install `binutils` | Uses `zypper` |
-| macOS | Supported | Install Homebrew `binutils` and expose GNU `strings` | Intel and Apple Silicon Python wheels are supported upstream |
+| macOS | Supported for Windows/Linux images | Install Homebrew `binutils` and expose GNU `strings` | Intel and Apple Silicon Python wheels are supported upstream |
 | Windows 10/11 | Supported | Requires a GNU-compatible `strings` in `PATH`; WSL is the easiest option | PowerShell instructions are below |
 | iOS/iPadOS | **Not supported** | Not supported | PySide6 is a desktop framework; use macOS for an Apple computer |
 
@@ -167,11 +167,11 @@ pipx install --force .
 
 ## Investigation workflow
 
-1. **Open memory image**, then choose a parent directory. A unique case folder containing `case.sqlite` is created, and baseline analysis begins automatically.
-2. Baseline runs `windows.info`, `pslist`, `pstree`, `cmdline`, and `netscan` sequentially. Each completed result becomes available even if another plugin fails. Diagnostics appear in the activity panel and are recorded in SQLite.
-3. Open **Process Tree**. Expand branches, filter by name/PID, and select a process. The inspector shows metadata/path, command line, and matching network objects. Select rows in Processes or Network to inspect their PID too.
-4. Use **Load DLLs for selected PID** to collect its loaded modules. **Memory Regions** uses `vadinfo` for the selected PID. **Files** runs the potentially expensive `filescan` only when requested.
-5. **Export process executable (PE)** invokes `pslist --pid PID --dump`. This recovers a process executable when available; it is not a full address-space dump. In Files, select an object and choose **Export selected cached file** to run `dumpfiles --virtaddr OFFSET`. Recovered content may be incomplete or unavailable. Inspect plugin result/status fields; successful plugin execution does not guarantee artifact recovery.
+1. **Open memory image**, then choose a parent directory. Choose **Auto-detect**, **Windows**, or **Linux** in the Image OS control. A unique case folder containing `case.sqlite` is created, and baseline analysis begins automatically.
+2. Auto-detect scans for a Linux kernel banner, then checks Windows requirements when no Linux banner is found. Linux baseline uses `banners.Banners`, `linux.pslist.PsList`, `linux.pstree.PsTree`, `linux.psaux.PsAux`, and `linux.sockstat.Sockstat`; Windows uses the corresponding Windows plugins. Each completed result becomes available even if another plugin fails. Diagnostics appear in the activity panel and are recorded in SQLite.
+3. Open **Process Tree**. Expand branches, filter by name/PID, and select a process. The inspector shows metadata/path, command line, and matching network objects. Select rows in Processes or Network to inspect their PID too. Linux rows normalize `COMM`, `PPID`, and creation-time fields into the same tree model.
+4. Use **Load DLLs for selected PID** to collect Windows DLLs or Linux memory-mapped ELF files. **Memory Regions** uses `vadinfo` on Windows and `linux.proc.Maps` on Linux. **Files** runs `filescan` on Windows or `linux.lsof.Lsof` on Linux only when requested.
+5. **Export process executable (PE/ELF)** invokes the platform process plugin with `--pid PID --dump`; on Linux this extracts the main ELF when available. This is not a full address-space dump. Cached-file export is currently Windows-only; Linux file rows are open-file evidence and can be copied or hashed after locating the original artifact. Recovered content may be incomplete or unavailable. Inspect plugin result/status fields; successful plugin execution does not guarantee artifact recovery.
 6. **SHA1 / SHA256** streams any selected local file in a background thread. Results appear in the activity panel and can be copied. Hashes are not automatically saved to the case database.
 7. **Open case** restores completed evidence. Missing or changed images allow cached review only. Reopen a changed image as a new case. **Run baseline** explicitly refreshes results; cached data is never used to skip a requested run.
 
@@ -181,13 +181,13 @@ Exports go into unique timestamped subdirectories. Files are never executed by t
 
 | Section | Current behavior |
 | --- | --- |
-| Overview | Image information, counts, workflow |
+| Overview | Image information, detected OS, counts, workflow |
 | Processes | Searchable process metadata table |
 | Process Tree | Expandable, searchable parent-child hierarchy and PID inspector |
 | Network | Searchable netscan results, PID correlation |
 | Files | On-demand file-object scan and cached-file export |
 | Memory Regions | On-demand VAD information for selected PID |
-| DLLs | On-demand loaded modules for selected PID |
+| DLLs | On-demand Windows DLLs or Linux mapped ELF files for selected PID |
 | Timeline | Derived process creation/exit and network creation events |
 | Strings Search | Background ASCII/UTF-16LE keyword search of the raw image, with offsets and copying |
 
@@ -209,11 +209,12 @@ Tables use Qt models rather than one widget per cell. Filters search all columns
 
 Volatility needs matching symbols. Windows symbols may download automatically on the first run; **Offline symbols** disables online symbol retrieval. Set an optional local symbol directory before running analysis. Symbol setup can take time, with the rest of the GUI still usable. The host must have sufficient RAM for Volatility and the selected result sets.
 
-If analysis fails, inspect the bottom diagnostics panel. Unsatisfied kernel/symbol requirements usually indicate unavailable symbols, an unsupported image, or an incorrect image type. Confirm the same plugin in the installed environment:
+If analysis fails, inspect the bottom diagnostics panel. Unsatisfied kernel/symbol requirements usually indicate unavailable symbols, an unsupported image, or an incorrect image type. Linux and macOS symbol tables must match the captured kernel; the Volatility Foundation recommends using the pre-generated Linux symbol packs where possible, or creating a table with `dwarf2json`. Confirm the same plugin in the installed environment:
 
 ```sh
 python -m volscope.vol_cli -f /path/to/memory.dmp windows.info.Info
 python -m volscope.vol_cli windows.dlllist.DllList --help
+python -m volscope.vol_cli linux.pslist.PsList --help
 ```
 
 If Qt reports an xcb platform dependency error on Linux, install the named missing system library. For headless tests only, set `QT_QPA_PLATFORM=offscreen`. For desktop use, a working X11 or Wayland session is required.
@@ -223,7 +224,7 @@ If Qt reports an xcb platform dependency error on Linux, install the named missi
 ```text
 src/volscope/
   app.py        Qt workspace, evidence table models, interaction wiring
-  core.py       Plugin registry, CLI arguments, JSON normalization, correlation
+  core.py       Platform plugin registry, CLI arguments, JSON normalization, correlation
   runner.py     QProcess queue, cancellation, threaded JSON decode and hashes
   storage.py    Case metadata, normalized results, run audit trail in SQLite
   vol_cli.py    Installed Volatility CLI entry point for subprocess execution
@@ -242,15 +243,15 @@ To add a plugin, register its fully qualified name and PID support in `core.PLUG
 QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests -v
 ```
 
-Tests cover nested JSON, missing values, malformed results, orphan/cyclic trees, parent PID reuse, correlation, case round-trips, safe argument boundaries, successful/failed background jobs, cancellation, UI selection, and known hashes. Synthetic fixtures exercise the GUI without a memory image. Real-image end-to-end validation is still required on your target Kali environment; no real memory capture is included in this project.
+Tests cover nested JSON, missing values, malformed results, orphan/cyclic trees, parent PID reuse, Windows/Linux correlation, case round-trips, safe argument boundaries, successful/failed background jobs, cancellation, UI selection, and known hashes. Synthetic fixtures exercise the GUI without a memory image. Real-image end-to-end validation is still required on your target Linux environment; no real memory capture is included in this project.
 
 ## Known limits and next steps
 
 - PID-only correlation is approximate, especially for stale network objects and PID reuse. Parent links with clearly newer creation times are detached. The app makes no automatic malware verdicts.
 - Data absent from a result is not proof of absence. Baseline errors are visible; a failed refresh leaves the previous successful result available and logs the failure.
 - JSON stdout and normalized results are currently held in memory. Very large scans may consume substantial RAM; table refresh and SQLite writes can briefly pause the UI. Streaming ingestion/pagination is a future improvement.
-- Timeline is derived from collected rows, not Volatility's comprehensive timeliner. No automatic OS detection, Linux-image plugins, full memory dumping, case annotations, or formal evidence-chain reporting yet.
+- Timeline is derived from collected rows, not Volatility's comprehensive timeliner. There is no full address-space dumping, Linux file-object recovery, case annotation, or formal evidence-chain reporting yet.
 - Image cache identity uses path, size, and modification time, not a cryptographic fingerprint. Use the hash action for evidence verification. Treat images as immutable during analysis.
 - Cases contain sensitive local evidence in an unencrypted SQLite file. Use your normal secured investigation workspace.
 
-Volatility command conventions follow the [official CLI documentation](https://volatility3.readthedocs.io/en/stable/vol-cli.html). Volatility is a separately installed dependency under its own license; this project does not vendor its code.
+Volatility command conventions follow the [official CLI documentation](https://volatility3.readthedocs.io/en/stable/vol-cli.html) and its [Linux tutorial](https://github.com/volatilityfoundation/volatility3/blob/develop/doc/source/getting-started-linux-tutorial.rst). Volatility is a separately installed dependency under its own license; this project does not vendor its code.

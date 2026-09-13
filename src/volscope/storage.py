@@ -30,6 +30,14 @@ class Case:
         row = self.db.execute("SELECT value FROM metadata WHERE key='image'").fetchone()
         return json.loads(row[0]) if row else None
 
+    def set_platform(self, platform):
+        self.db.execute("INSERT OR REPLACE INTO metadata VALUES ('platform', ?)", (platform,))
+        self.db.commit()
+
+    def platform(self):
+        row = self.db.execute("SELECT value FROM metadata WHERE key='platform'").fetchone()
+        return row[0] if row else None
+
     def save(self, key, rows):
         self.db.execute("INSERT OR REPLACE INTO results VALUES (?, ?)", (key, json.dumps(rows)))
         self.db.commit()

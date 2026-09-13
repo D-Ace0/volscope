@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QSortFilterProxyModel, QThread
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
+    QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit, QListWidget, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
     QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
@@ -140,6 +140,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VolScope · Memory Investigation")
         self.resize(1440, 900)
         self.results, self.case, self.image, self.pid = {}, None, None, None
+        self.platform = "auto"
         self.demo = False
         self.hash_worker = self.string_worker = None
         self.runner = Runner(self)
@@ -166,6 +167,14 @@ class MainWindow(QMainWindow):
         bar.addStretch()
         layout.addLayout(bar)
         options = QHBoxLayout()
+        options.addWidget(QLabel("Image OS:"))
+        self.platform_combo = QComboBox()
+        self.platform_combo.addItem("Auto-detect", "auto")
+        self.platform_combo.addItem("Windows", "windows")
+        self.platform_combo.addItem("Linux", "linux")
+        self.platform_combo.setToolTip("Select Linux for a Linux kernel dump; Auto-detect checks for a Linux banner")
+        self.platform_combo.currentIndexChanged.connect(lambda: setattr(self, "platform", self.platform_combo.currentData()))
+        options.addWidget(self.platform_combo)
         self.offline = QCheckBox("Offline symbols")
         options.addWidget(self.offline)
         self.symbols = QLineEdit(placeholderText="Optional symbol directory")
@@ -319,10 +328,11 @@ class MainWindow(QMainWindow):
             self.case.close()
         self.case = None
         self.results, self.image, self.pid, self.demo = {}, None, None, False
+        self.platform = self.platform_combo.currentData() if hasattr(self, "platform_combo") else "auto"
         self.log.clear()
 
     def open_image(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Windows memory image", "", "Memory images (*.raw *.mem *.dmp *.vmem *.bin);;All files (*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Select memory image", "", "Memory images (*.raw *.mem *.dmp *.vmem *.bin);;All files (*)")
         if not path:
             return
         folder = QFileDialog.getExistingDirectory(self, "Choose parent folder for a new case")
@@ -342,6 +352,7 @@ class MainWindow(QMainWindow):
             return
         self.reset()
         self.case, self.image = new_case, str(Path(path).resolve())
+        self.platform = self.platform_combo.currentData()
         self.case_label.setText(f"{Path(path).name}   ·   {directory}")
         self.refresh()
         self.baseline()
@@ -369,6 +380,12 @@ class MainWindow(QMainWindow):
         self.reset()
         self.case, self.results = case, data
         self.image = stored["path"] if valid else None
+        stored_platform = case.platform()
+        if stored_platform in ("windows", "linux"):
+            self.platform = stored_platform
+            self.platform_combo.setCurrentIndex(self.platform_combo.findData(stored_platform))
+        else:
+            self.platform = self.platform_combo.currentData()
         self.case_label.setText(f"{Path(path).parent.name} · {'Cached case' if valid else 'Cached results only — original image missing or changed'}")
         self.refresh()
 
@@ -384,8 +401,30 @@ class MainWindow(QMainWindow):
     def baseline(self):
         if not self.ensure_image():
             return
+        requested = self.platform_combo.currentData()
+        if requested == "auto":
+            self.platform = "detecting"
+            self.log.appendPlainText("Detecting image operating system with Volatility banners.Banners…")
+            self.runner.enqueue(self.image, "detect_linux", platform="linux", offline=self.offline.isChecked(), symbols=self.symbols.text().strip() or None)
+            return
+        self.set_platform(requested)
+        self.start_baseline()
+
+    def start_baseline(self):
         for key in BASELINE:
             self.run_plugin(key)
+
+    def set_platform(self, platform):
+        if platform not in ("windows", "linux"):
+            return
+        self.platform = platform
+        self.platform_combo.blockSignals(True)
+        self.platform_combo.setCurrentIndex(self.platform_combo.findData(platform))
+        self.platform_combo.blockSignals(False)
+        if self.case:
+            self.case.set_platform(platform)
+        self.case_label.setText(self.case_label.text().split("   ·   ")[0] + f"   ·   {platform.title()} image")
+        self.log.appendPlainText(f"Using {platform.title()} Volatility plugins")
 
     def ensure_image(self):
         if not self.image:
@@ -402,16 +441,32 @@ class MainWindow(QMainWindow):
     def run_plugin(self, key, **kwargs):
         if not self.ensure_image():
             return
+        active_platform = self.platform if self.platform in ("windows", "linux") else self.platform_combo.currentData()
+        if active_platform == "auto":
+            active_platform = "windows"
         pid = self.pid if PLUGINS[key].pid else None
         if PLUGINS[key].pid and pid is None:
             self.error("Select a process first")
             return
         try:
-            self.runner.enqueue(self.image, key, pid, offline=self.offline.isChecked(), symbols=self.symbols.text().strip() or None, **kwargs)
+            self.runner.enqueue(self.image, key, pid, platform=active_platform, offline=self.offline.isChecked(), symbols=self.symbols.text().strip() or None, **kwargs)
         except Exception as exc:
             self.error(exc)
 
     def on_result(self, key, rows):
+        if key == "detect_linux":
+            banner_text = " ".join(str(row.get("Banner", "")) for row in rows)
+            if "Linux version" in banner_text:
+                self.set_platform("linux")
+                self.start_baseline()
+            else:
+                self.log.appendPlainText("No Linux banner found; checking Windows image requirements…")
+                self.runner.enqueue(self.image, "detect_windows", platform="windows", offline=self.offline.isChecked(), symbols=self.symbols.text().strip() or None)
+            return
+        if key == "detect_windows":
+            self.set_platform("windows")
+            self.start_baseline()
+            return
         self.results[key] = rows
         if key.startswith("dump_"):
             self.log.appendPlainText("Artifact recovery results:\n" + json.dumps(rows, indent=2, ensure_ascii=False))
@@ -424,6 +479,11 @@ class MainWindow(QMainWindow):
 
     def on_report(self, key, status, args, diagnostics):
         self.log.appendPlainText(f"{key}: {status}\n{diagnostics}")
+        if key == "detect_linux" and status == "failed":
+            self.runner.enqueue(self.image, "detect_windows", platform="windows", offline=self.offline.isChecked(), symbols=self.symbols.text().strip() or None)
+        elif key == "detect_windows" and status == "failed":
+            self.platform = "auto"
+            self.log.appendPlainText("Could not identify this image as Linux or Windows. Choose the image OS manually and run baseline again.")
         if self.case:
             try:
                 self.case.record(key, status, args, diagnostics)
@@ -435,8 +495,8 @@ class MainWindow(QMainWindow):
         self.overview.setPlainText(
             f"{'SYNTHETIC DEMO' if self.demo else 'CASE OVERVIEW'}\n\n"
             f"Processes: {len(procs):,}\nNetwork objects: {len(self.results.get('netscan', [])):,}\n"
-            f"Completed result sets: {len(self.results)}\n\n"
-            "Workflow\n1. Open a Windows memory image.\n2. Review the process tree and select a PID.\n"
+            f"Completed result sets: {len(self.results)}\nImage OS: {self.platform.title() if self.platform in ('windows', 'linux') else 'Auto-detect'}\n\n"
+            "Workflow\n1. Open a Windows or Linux memory image.\n2. Review the process tree and select a PID.\n"
             "3. Inspect metadata and network evidence; load DLLs on demand.\n"
             "4. Load files or memory regions as needed, then export artifacts.\n\n"
             "Sections show collected evidence, not a clean bill of health. Failed plugins are recorded below.\n"

@@ -54,6 +54,21 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             command('a', 'dump_process')
 
+    def test_linux_plugin_contract_and_normalization(self):
+        args = command('/tmp/linux.raw', 'pslist', platform='linux')
+        self.assertEqual(args[-1], 'linux.pslist.PsList')
+        self.assertEqual(command('/tmp/linux.raw', 'dlllist', pid=42, platform='linux')[-2:], ['--pid', '42'])
+        self.assertEqual(command('/tmp/linux.raw', 'dump_process', pid=42, output='/tmp/out', platform='linux')[-3:], ['--pid', '42', '--dump'])
+        with self.assertRaises(ValueError):
+            command('/tmp/linux.raw', 'dump_file', offset='0x1234', output='/tmp/out', platform='linux')
+        linux = {
+            'pslist': [{'PID': 1, 'PPID': 0, 'COMM': 'systemd', 'CREATION TIME': '2026'}],
+            'pstree': [{'Pid': 42, 'Ppid': 1, 'COMM': 'bash'}],
+            'cmdline': [{'PID': 42, 'ARGS': '/bin/bash -i'}],
+        }
+        self.assertEqual(processes(linux)[42]['ImageFileName'], 'bash')
+        self.assertEqual(correlate(linux, 42)[0]['Command line'], '/bin/bash -i')
+
     def test_case_roundtrip_and_image_change(self):
         with tempfile.TemporaryDirectory() as directory:
             image = Path(directory) / 'memory.raw'
