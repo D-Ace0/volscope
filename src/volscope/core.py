@@ -36,11 +36,23 @@ PLUGINS = {
     "dump_process": Plugin("Export process executable", True,
                            {"windows": "windows.pslist.PsList", "linux": "linux.pslist.PsList"}),
     "dump_file": Plugin("Export cached file", names={"windows": "windows.dumpfiles.DumpFiles"}),
+    # Linux kernel / rootkit evidence.  The hidden-module plugin moved under
+    # linux.malware in newer Volatility releases; the runner handles the
+    # alias fallback when the first name is unavailable.
+    "linux_lsmod": Plugin("Kernel modules", names={"linux": "linux.lsmod.Lsmod"}),
+    "linux_hidden_modules": Plugin("Hidden kernel modules", names={"linux": "linux.malware.hidden_modules.Hidden_modules"}),
+    "linux_kmsg": Plugin("Kernel log", names={"linux": "linux.kmsg.Kmsg"}),
+    "linux_tracepoints": Plugin("Tracepoint hooks", names={"linux": "linux.tracing.tracepoints.CheckTracepoints"}),
+    "linux_ftrace": Plugin("Ftrace hooks", names={"linux": "linux.tracing.ftrace.CheckFtrace"}),
+    "linux_envars": Plugin("Environment variables", True, names={"linux": "linux.envars.Envars"}),
+}
+PLUGIN_ALIASES = {
+    "linux_hidden_modules": ("linux.hidden_modules.Hidden_modules",),
 }
 BASELINE = ("info", "pslist", "pstree", "cmdline", "netscan")
 
 
-def command(image, key, pid=None, output=None, offset=None, offline=False, symbols=None, platform="windows"):
+def command(image, key, pid=None, output=None, offset=None, offline=False, symbols=None, platform="windows", plugin_name=None):
     spec = PLUGINS[key]
     args = ["-m", "volscope.vol_cli", "-q", "-r", "json", "-f", str(image)]
     if offline:
@@ -49,7 +61,7 @@ def command(image, key, pid=None, output=None, offset=None, offline=False, symbo
         args += ["-s", str(symbols)]
     if output:
         args += ["-o", str(output)]
-    args += [spec.name(platform)]
+    args += [plugin_name or spec.name(platform)]
     if pid is not None:
         if not spec.pid:
             raise ValueError("This plugin does not accept a PID")
@@ -85,7 +97,7 @@ def parse_rows(raw):
 
 def pid_of(row):
     try:
-        return int(next((row[key] for key in ("PID", "Pid", "pid") if row.get(key) is not None), None))
+        return int(next((row[key] for key in ("PID", "Pid", "pid", "Task/PID", "Task PID") if row.get(key) is not None), None))
     except (TypeError, ValueError):
         return None
 
@@ -151,3 +163,86 @@ def timeline(results):
         if row.get("Created"):
             events.append({"Time": row["Created"], "Event": "Network object created", "PID": row.get("PID"), "Name": row.get("Owner"), "Source": "netscan"})
     return sorted(events, key=lambda r: str(r["Time"]))
+
+
+def linux_modules(results):
+    """Merge normal lsmod and hidden-module results without a verdict."""
+    normal = results.get("linux_lsmod", [])
+    hidden = results.get("linux_hidden_modules", [])
+    rows = {}
+    def key(row):
+        return str(row.get("Name") or row.get("Module") or row.get("module") or row.get("Module Name") or row.get("Address") or row.get("address") or "").strip()
+    for row in normal:
+        name = key(row)
+        if name:
+            rows.setdefault(name, {}).update(row)
+            rows[name]["Normal lsmod"] = "Yes"
+            rows[name]["Hidden scan"] = rows[name].get("Hidden scan", "No")
+    for row in hidden:
+        name = key(row)
+        if not name:
+            continue
+        rows.setdefault(name, {}).update(row)
+        rows[name]["Normal lsmod"] = rows[name].get("Normal lsmod", "No")
+        rows[name]["Hidden scan"] = "Yes"
+    output = []
+    for row in rows.values():
+        row["Enumeration discrepancy"] = "Hidden scan only" if row.get("Hidden scan") == "Yes" and row.get("Normal lsmod") == "No" else ""
+        output.append(row)
+    return output
+
+
+def linux_hooks(results):
+    """Present ftrace and tracepoint evidence in one pivotable table."""
+    rows = []
+    for row in results.get("linux_ftrace", []):
+        item = dict(row); item["Evidence"] = "ftrace"; rows.append(item)
+    for row in results.get("linux_tracepoints", []):
+        item = dict(row); item["Evidence"] = "tracepoint"; rows.append(item)
+    return rows
+
+
+def linux_envar_rows(results):
+    rows = [dict(row) for key, values in results.items() if key == "linux_envars" or key.startswith("linux_envars:") for row in values]
+    counts = {}
+    for row in rows:
+        key = str(row.get("Key") or row.get("Variable") or row.get("Name") or row.get("key") or "")
+        value = str(row.get("Value") or row.get("value") or "")
+        row["KEY=VALUE"] = f"{key}={value}"
+        signature = (key, value)
+        counts[signature] = counts.get(signature, 0) + 1
+    for row in rows:
+        key = str(row.get("Key") or row.get("Variable") or row.get("Name") or row.get("key") or "")
+        value = str(row.get("Value") or row.get("value") or "")
+        row["Rarity"] = "Uncommon" if counts.get((key, value), 0) <= 1 else "Common"
+    by_pid = {}
+    for row in rows:
+        pid = pid_of(row)
+        if pid is not None:
+            by_pid.setdefault(pid, set()).add(row["KEY=VALUE"])
+    proc_rows = processes(results)
+    for row in rows:
+        pid = pid_of(row)
+        signature = row["KEY=VALUE"]
+        row["Parent comparison"] = ""
+        if pid in proc_rows:
+            try:
+                parent = int(proc_rows[pid].get("PPID"))
+            except (TypeError, ValueError):
+                parent = None
+            if parent in by_pid and signature not in by_pid[parent]:
+                row["Parent comparison"] = "Child-only variable"
+            elif parent in by_pid:
+                row["Parent comparison"] = "Also present in parent"
+    return rows
+
+
+def linux_kmsg_rows(results):
+    rows = []
+    for row in results.get("linux_kmsg", []):
+        item = dict(row)
+        item.setdefault("Seconds", row.get("Time") or row.get("Timestamp") or row.get("Seconds Since Boot"))
+        item.setdefault("Task/PID", row.get("Task") or row.get("PID") or row.get("Pid"))
+        item.setdefault("Message", row.get("Message") or row.get("msg") or row.get("Text"))
+        rows.append(item)
+    return rows

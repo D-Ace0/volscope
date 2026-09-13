@@ -7,7 +7,7 @@ from collections import deque
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QProcess, QThread, Signal
-from .core import command, parse_rows
+from .core import PLUGIN_ALIASES, PLUGINS, command, parse_rows
 
 
 class Decode(QThread):
@@ -133,6 +133,7 @@ class Runner(QObject):
         self.proc.finished.connect(self._finished)
         self.proc.errorOccurred.connect(self._error)
         self.cancelled = False
+        self.alias_attempted = set()
 
     def enqueue(self, image, key, pid=None, **options):
         token = f"{key}:{pid}" if pid is not None else key
@@ -190,6 +191,19 @@ class Runner(QObject):
         token, args = self.active
         if self.cancelled:
             error = "Cancelled by analyst"
+        # Volatility has renamed a few Linux plugins across releases. Retry an
+        # explicit legacy alias once when the primary plugin cannot start or
+        # exits without JSON, keeping the UI and case key stable.
+        base_key = token.split(":", 1)[0]
+        aliases = PLUGIN_ALIASES.get(base_key, ())
+        if error and aliases and base_key not in self.alias_attempted and not self.cancelled:
+            self.alias_attempted.add(base_key)
+            replacement = aliases[0]
+            retried = [replacement if value == PLUGINS[base_key].name("linux") else value for value in args]
+            self.active = None
+            self.queue.appendleft((token, retried))
+            self._next()
+            return
         diagnostics = self.errors.decode("utf-8", errors="replace")
         self.report.emit(token, "failed" if error else "complete", args, (error + "\n" + diagnostics).strip())
         if not error:

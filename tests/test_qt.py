@@ -30,7 +30,7 @@ class QtTests(unittest.TestCase):
         window = MainWindow(demo=True)
         window.show()
         APP.processEvents()
-        self.assertEqual(window.pages.count(), 9)
+        self.assertEqual(window.pages.count(), 14)
         self.assertEqual(window.pid, 4628)
         self.assertIn('LabSample.exe', window.metadata.toPlainText())
         self.assertEqual(window.pid_network.proxy.rowCount(), 1)

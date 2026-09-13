@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (
     QSpinBox, QSplitter, QStackedWidget, QTabWidget, QTableView, QTreeWidget, QTreeWidgetItem,
     QVBoxLayout, QWidget,
 )
-from .core import BASELINE, PLUGINS, correlate, parent_map, pid_of, processes, timeline
+from .core import (BASELINE, PLUGINS, correlate, linux_envar_rows, linux_hooks,
+                   linux_kmsg_rows, linux_modules, parent_map, pid_of, processes, timeline)
 from .demo import results as demo_results
 from .runner import Hasher, Runner, StringScanner
 from .storage import Case, identity
@@ -184,7 +185,8 @@ class MainWindow(QMainWindow):
         layout.addLayout(options)
         split = QSplitter()
         self.nav = QListWidget()
-        self.sections = ["Overview", "Processes", "Process Tree", "Network", "Files", "Memory Regions", "DLLs", "Timeline", "Strings Search"]
+        self.sections = ["Overview", "Processes", "Process Tree", "Network", "Files", "Memory Regions", "DLLs", "Timeline", "Strings Search",
+                         "Linux Kernel / Rootkit", "Kernel Modules", "Kernel Log", "Kernel Hooks", "Environment Variables"]
         self.nav.addItems(self.sections)
         self.nav.setMaximumWidth(185)
         split.addWidget(self.nav)
@@ -235,6 +237,39 @@ class MainWindow(QMainWindow):
                 page_layout.addLayout(options)
                 self.strings_table = EvidenceTable()
                 page_layout.addWidget(self.strings_table)
+            elif section == "Linux Kernel / Rootkit":
+                note = QLabel("Linux kernel evidence is investigative context. Hidden, tainted, or hooked objects require analyst validation; VolScope does not assign maliciousness.")
+                note.setWordWrap(True)
+                page_layout.addWidget(note)
+                self.kernel_summary = QPlainTextEdit(); self.kernel_summary.setReadOnly(True); page_layout.addWidget(self.kernel_summary)
+                actions = QHBoxLayout()
+                for text, key in (("Load modules", "linux_lsmod"), ("Scan hidden modules", "linux_hidden_modules"), ("Load kernel log", "linux_kmsg"), ("Check tracepoints", "linux_tracepoints"), ("Check ftrace", "linux_ftrace"), ("Load environment variables", "linux_envars")):
+                    self.button(actions, text, lambda checked=False, k=key: self.run_plugin(k))
+                page_layout.addLayout(actions)
+                page_layout.addWidget(QLabel("Use the dedicated views below to filter and pivot through the collected evidence."))
+            elif section == "Kernel Modules":
+                actions = QHBoxLayout()
+                self.button(actions, "Load lsmod", lambda: self.run_plugin("linux_lsmod"))
+                self.button(actions, "Scan hidden modules", lambda: self.run_plugin("linux_hidden_modules"))
+                actions.addStretch(); page_layout.addLayout(actions)
+                table = EvidenceTable(); self.tables[section] = table; page_layout.addWidget(table)
+                table.view.clicked.connect(lambda index, t=table: self.pivot_module(t, index))
+            elif section == "Kernel Log":
+                self.button(page_layout, "Load kernel log", lambda: self.run_plugin("linux_kmsg"))
+                table = EvidenceTable(); self.tables[section] = table; page_layout.addWidget(table)
+                table.view.clicked.connect(lambda index, t=table: self.select_table_pid(t, index))
+            elif section == "Kernel Hooks":
+                actions = QHBoxLayout()
+                self.button(actions, "Check tracepoints", lambda: self.run_plugin("linux_tracepoints"))
+                self.button(actions, "Check ftrace", lambda: self.run_plugin("linux_ftrace"))
+                actions.addStretch(); page_layout.addLayout(actions)
+                table = EvidenceTable(); self.tables[section] = table; page_layout.addWidget(table)
+            elif section == "Environment Variables":
+                note = QLabel("Filter by PID, process/COMM, key, or value. Rarity is descriptive evidence across the collected processes, not a maliciousness verdict.")
+                note.setWordWrap(True); page_layout.addWidget(note)
+                self.button(page_layout, "Load environment variables", lambda: self.run_plugin("linux_envars"))
+                table = EvidenceTable(); self.tables[section] = table; page_layout.addWidget(table)
+                table.view.clicked.connect(lambda index, t=table: self.select_table_pid(t, index))
             elif section == "Process Tree":
                 search = QLineEdit(placeholderText="Find process or PID (matching branches stay visible)")
                 search.textChanged.connect(self.filter_tree)
@@ -256,10 +291,14 @@ class MainWindow(QMainWindow):
                     key = {"Files": "filescan", "Memory Regions": "vadinfo", "DLLs": "dlllist"}[section]
                     self.button(actions, "Load " + section.lower(), lambda checked=False, k=key: self.run_plugin(k))
                     if section == "Files":
-                        self.button(actions, "Export selected cached file", self.dump_file)
+                        self.dump_file_button = self.button(actions, "Export selected cached file", self.dump_file)
                     page_layout.addLayout(actions)
                 table = EvidenceTable()
                 self.tables[section] = table
+                if section == "Network":
+                    self.network_summary = QLabel("Endpoint grouping appears after network evidence is loaded.")
+                    self.network_summary.setWordWrap(True)
+                    page_layout.addWidget(self.network_summary)
                 if section in ("Processes", "Network", "DLLs", "Memory Regions", "Timeline"):
                     table.view.clicked.connect(lambda index, t=table: self.select_table_pid(t, index))
                 page_layout.addWidget(table)
@@ -281,7 +320,7 @@ class MainWindow(QMainWindow):
         dl.addWidget(self.details)
         self.button(dl, "Load DLLs for selected PID", lambda: self.run_plugin("dlllist"))
         self.button(dl, "Load memory regions for PID", lambda: self.run_plugin("vadinfo"))
-        self.button(dl, "Export process executable (PE)", self.dump_process)
+        self.dump_process_button = self.button(dl, "Export process executable (PE)", self.dump_process)
         note = QLabel("PID links are investigative leads. PID reuse and stale network objects can affect correlation.")
         note.setWordWrap(True)
         note.setObjectName("subtitle")
@@ -492,6 +531,11 @@ class MainWindow(QMainWindow):
 
     def refresh(self):
         procs = processes(self.results)
+        is_linux = self.platform == "linux"
+        if hasattr(self, "dump_process_button"):
+            self.dump_process_button.setText("Export process executable (ELF)" if is_linux else "Export process executable (PE)")
+        if hasattr(self, "dump_file_button"):
+            self.dump_file_button.setVisible(not is_linux)
         self.overview.setPlainText(
             f"{'SYNTHETIC DEMO' if self.demo else 'CASE OVERVIEW'}\n\n"
             f"Processes: {len(procs):,}\nNetwork objects: {len(self.results.get('netscan', [])):,}\n"
@@ -504,8 +548,39 @@ class MainWindow(QMainWindow):
             + "Image information\n" + json.dumps(self.results.get("info", []), indent=2, ensure_ascii=False))
         self.tables["Processes"].set_rows(list(procs.values()))
         self.tables["Network"].set_rows(self.results.get("netscan", []))
+        endpoints = {}
+        for row in self.results.get("netscan", []):
+            remote = row.get("ForeignAddr") or row.get("Remote") or row.get("RemoteAddr")
+            port = row.get("ForeignPort") or row.get("RemotePort")
+            if remote:
+                label = f"{remote}:{port}" if port else str(remote)
+                endpoints.setdefault(label, set()).add(str(pid_of(row) or row.get("Owner") or "unknown"))
+        if hasattr(self, "network_summary"):
+            grouped = sorted(endpoints.items(), key=lambda item: (-len(item[1]), item[0]))
+            self.network_summary.setText("Repeated remote endpoints\n" + ("\n".join(f"{endpoint} · {len(pids)} associated PID/owner value(s)" for endpoint, pids in grouped[:20]) or "No endpoint evidence loaded") + "\n\nPID association is a lead and may be affected by PID reuse or stale socket objects.")
         self.tables["Files"].set_rows(self.results.get("filescan", []))
         self.tables["Timeline"].set_rows(timeline(self.results))
+        self.tables["Kernel Modules"].set_rows(linux_modules(self.results))
+        self.tables["Kernel Log"].set_rows(linux_kmsg_rows(self.results))
+        self.tables["Kernel Hooks"].set_rows(linux_hooks(self.results))
+        self.tables["Environment Variables"].set_rows(linux_envar_rows(self.results))
+        if hasattr(self, "kernel_summary"):
+            modules = linux_modules(self.results)
+            hooks = linux_hooks(self.results)
+            hidden = [r for r in modules if r.get("Enumeration discrepancy") == "Hidden scan only"]
+            tainted = [r for r in modules if r.get("Taints") or r.get("Taint")]
+            callbacks = {}
+            for row in hooks:
+                cb = str(row.get("Callback") or row.get("callback") or row.get("Callback Address") or "")
+                if cb: callbacks.setdefault(cb, 0); callbacks[cb] += 1
+            self.kernel_summary.setPlainText(
+                f"Modules collected: {len(modules):,}\n"
+                f"Hidden-scan-only modules: {len(hidden):,}\n"
+                f"Modules reporting taint fields: {len(tainted):,}\n"
+                f"Hook records: {len(hooks):,}\n"
+                f"Unique callback values: {len(callbacks):,}\n\n"
+                "Review discrepancies, taints, and callback groups as leads for validation."
+            )
         self.tree.blockSignals(True)
         self.tree.clear()
         nodes = {pid: QTreeWidgetItem([str(r.get("ImageFileName", "Unknown")), str(pid), str(r.get("PPID", "")), str(r.get("CreateTime", ""))]) for pid, r in procs.items()}
@@ -547,6 +622,17 @@ class MainWindow(QMainWindow):
         if pid != self.pid:
             self.select_pid(pid)
 
+    def pivot_module(self, table, index):
+        row = table.selected(index)
+        module = str(row.get("Name") or row.get("Module") or row.get("module") or "").strip()
+        if not module:
+            return
+        # Set investigator-friendly pivots without asserting that the module
+        # or its hooks are malicious.
+        self.tables["Kernel Hooks"].search.setText(module)
+        self.tables["Kernel Log"].search.setText(module)
+        self.nav.setCurrentRow(self.sections.index("Kernel Hooks"))
+
     def select_pid(self, pid):
         self.pid = pid
         if pid is None:
@@ -563,6 +649,10 @@ class MainWindow(QMainWindow):
         self.pid_dlls.set_rows(dlls)
         self.tables["DLLs"].set_rows(dlls)
         self.tables["Memory Regions"].set_rows(self.results.get(f"vadinfo:{pid}", []))
+        env = [r for r in linux_envar_rows(self.results) if pid_of(r) == pid]
+        # Keep the inspector compact while making the Linux pivots one click away.
+        if pid is not None and env:
+            self.metadata.appendPlainText("\nEnvironment variables\n" + "\n".join(r.get("KEY=VALUE", "") for r in env))
 
     def export_directory(self):
         folder = QFileDialog.getExistingDirectory(self, "Choose parent directory for recovered artifacts")

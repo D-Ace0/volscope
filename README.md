@@ -191,6 +191,17 @@ Exports go into unique timestamped subdirectories. Files are never executed by t
 | Timeline | Derived process creation/exit and network creation events |
 | Strings Search | Background ASCII/UTF-16LE keyword search of the raw image, with offsets and copying |
 
+Linux investigations also include a dedicated **Linux Kernel / Rootkit** workspace. It loads evidence on demand and keeps the evidence descriptive rather than assigning a malware verdict:
+
+| Linux section | Volatility source and investigator helpers |
+| --- | --- |
+| Kernel Modules | `linux.lsmod` plus `linux.malware.hidden_modules`; merges module name, address, size, taints, arguments, normal enumeration, hidden-scan presence, and highlights hidden-scan-only discrepancies |
+| Kernel Log | `linux.kmsg`; searchable seconds-since-boot, task/PID, severity/facility, and message fields with PID pivots |
+| Kernel Hooks | `linux.tracing.tracepoints.CheckTracepoints` and `linux.tracing.ftrace.CheckFtrace`; combines tracepoint and ftrace records, callback/symbol/module fields, and callback/module summaries |
+| Environment Variables | `linux.envars.Envars`; filters by PID, COMM, key, value, displays `KEY=VALUE`, and marks uncommon values across collected processes |
+
+The rootkit workspace is useful for correlating a module with its kernel-log entries and hooks, a kmsg PID with its process, or a process with its sockets, files, memory mappings, and environment variables. Hidden modules, taints, centralized callbacks, and unusual variables are leads for analyst validation; none is treated as proof of maliciousness. Linux process export uses ELF terminology, and Windows-only cached-file recovery is hidden when a Linux image is selected. The hidden-module plugin has moved between Volatility releases; if a local installation exposes the legacy `linux.hidden_modules` alias, register that alias in the plugin registry while keeping the same view.
+
 ## Search memory strings
 
 Open **Strings Search**, enter a literal keyword, choose ASCII and/or UTF-16LE, then click **Search memory**. VolScope runs GNU `strings` directly and performs fixed-text filtering inside the app; it never builds a shell command from your input. This gives the practical behavior of `strings | grep -F keyword` while safely supporting spaces, quotes, and shell characters. Results include the hexadecimal image offset, encoding, and complete matching string. Click a field and press **Ctrl+C** to copy it. The result limit prevents a broad keyword from exhausting memory.

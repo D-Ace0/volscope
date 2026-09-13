@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from volscope.core import command, correlate, parent_map, parse_rows, processes, timeline
+from volscope.core import (command, correlate, linux_envar_rows, linux_hooks,
+                           linux_kmsg_rows, linux_modules, parent_map, parse_rows, processes, timeline)
 from volscope.demo import results
 from volscope.storage import Case, identity
 
@@ -79,6 +80,22 @@ class CoreTests(unittest.TestCase):
             case.save('pslist', [{"PID": 4}])
             case.record('pslist', 'complete', ['-f', str(image)], '')
             case.close()
+
+    def test_linux_rootkit_evidence_helpers(self):
+        data = {
+            'linux_lsmod': [{'Name': 'normal', 'Address': '0x1', 'Size': 12}],
+            'linux_hidden_modules': [{'Name': 'hidden', 'Address': '0x2', 'Taints': 'O'}],
+            'linux_ftrace': [{'Callback': '0xabc', 'Symbol': 'do_sys_open'}],
+            'linux_tracepoints': [{'Name': 'sched_switch', 'Address': '0x3'}],
+            'linux_kmsg': [{'Timestamp': 12.5, 'PID': 77, 'Message': 'module loaded'}],
+            'linux_envars:77': [{'PID': 77, 'COMM': 'bash', 'Key': 'OP', 'Value': 'x'}],
+        }
+        modules = linux_modules(data)
+        self.assertEqual(len(modules), 2)
+        self.assertEqual(next(r for r in modules if r['Name'] == 'hidden')['Enumeration discrepancy'], 'Hidden scan only')
+        self.assertEqual(len(linux_hooks(data)), 2)
+        self.assertEqual(linux_kmsg_rows(data)[0]['Seconds'], 12.5)
+        self.assertEqual(linux_envar_rows(data)[0]['KEY=VALUE'], 'OP=x')
             case = Case(db)
             self.assertEqual(case.load(), {'pslist': [{"PID": 4}]})
             self.assertEqual(case.image(), identity(image))
